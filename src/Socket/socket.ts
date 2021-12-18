@@ -5,7 +5,7 @@ import WebSocket from "ws"
 import { randomBytes } from 'crypto'
 import { proto } from '../../WAProto'
 import { DisconnectReason, SocketConfig, BaileysEventEmitter, ConnectionState, AuthenticationCreds } from "../Types"
-import { Curve, generateRegistrationNode, configureSuccessfulPairing, generateLoginNode, encodeBigEndian, promiseTimeout, generateOrGetPreKeys, xmppSignedPreKey, xmppPreKey, getPreKeys, makeNoiseHandler, useSingleFileAuthState } from "../Utils"
+import { Curve, generateRegistrationNode, configureSuccessfulPairing, generateLoginNode, encodeBigEndian, promiseTimeout, generateOrGetPreKeys, xmppSignedPreKey, xmppPreKey, getPreKeys, makeNoiseHandler, useSingleFileAuthState, addTransactionCapability } from "../Utils"
 import { DEFAULT_ORIGIN, DEF_TAG_PREFIX, DEF_CALLBACK_PREFIX, KEY_BUNDLE_TYPE } from "../Defaults"
 import { assertNodeErrorFree, BinaryNode, encodeBinaryNode, S_WHATSAPP_NET, getBinaryNodeChild } from '../WABinary'
 
@@ -68,9 +68,12 @@ export const makeSocket = ({
 
 	const sendPromise = promisify<void>(ws.send)
 	/** send a raw buffer */
-	const sendRawMessage = (data: Buffer | Uint8Array) => {
+	const sendRawMessage = async(data: Buffer | Uint8Array) => {
+        if(ws.readyState !== ws.OPEN) {
+            throw new Boom('Connection Closed', { statusCode: DisconnectReason.connectionClosed })
+        }
         const bytes = noise.encodeFrame(data)
-        return sendPromise.call(ws, bytes) as Promise<void>
+        await sendPromise.call(ws, bytes) as Promise<void>
     }
     /** send a binary node */
     const sendNode = (node: BinaryNode) => {
@@ -196,10 +199,8 @@ export const makeSocket = ({
         if(!creds.serverHasPreKeys) {
             update.serverHasPreKeys = true
         }
-       
-        await Promise.all(
-            Object.keys(newPreKeys).map(k => authState.keys.setPreKey(+k, newPreKeys[+k]))
-        )
+
+        await authState.keys.set({ 'pre-key': newPreKeys })
 
         const preKeys = await getPreKeys(authState.keys, preKeysRange[0], preKeysRange[0] + preKeysRange[1])
         await execute(preKeys)
@@ -449,7 +450,7 @@ export const makeSocket = ({
         const genPairQR = () => {
             const ref = refs.shift()
             if(!ref) {
-                end(new Boom('QR refs attempts ended', { statusCode: DisconnectReason.restartRequired }))
+                end(new Boom('QR refs attempts ended', { statusCode: DisconnectReason.timedOut }))
                 return
             }
 
@@ -529,7 +530,7 @@ export const makeSocket = ({
     })
 
     ws.on('CB:ib,,downgrade_webclient', () => {
-        end(new Boom('Multi-device beta not joined', { statusCode: DisconnectReason.notJoinedBeta }))
+        end(new Boom('Multi-device beta not joined', { statusCode: DisconnectReason.multideviceMismatch }))
     })
 
     process.nextTick(() => {
@@ -541,7 +542,11 @@ export const makeSocket = ({
 	return {
         ws,
         ev,
-        authState,
+        authState: {
+            creds,
+            // add capability
+            keys: addTransactionCapability(authState.keys, logger)
+        },
         get user () {
             return authState.creds.me
         },

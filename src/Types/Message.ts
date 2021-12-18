@@ -23,6 +23,8 @@ export type WAMediaUpload = Buffer | { url: URL | string } | { stream: Readable 
 /** Set of message types that are supported by the library */
 export type MessageType = keyof proto.Message
 
+export type DownloadableMessage = { mediaKey?: Uint8Array, directPath?: string, url?: string }
+
 export type MediaConnInfo = {
     auth: string 
     ttl: number
@@ -75,7 +77,7 @@ export type AnyMediaMessageContent = (
     } & Mentionable & Buttonable & Templatable & WithDimensions) | {
         audio: WAMediaUpload
         /** if set to true, will send as a `voice note` */
-        pttAudio?: boolean
+        ptt?: boolean
         /** optionally tell the duration of the audio */
         seconds?: number
     } | ({
@@ -115,6 +117,8 @@ export type AnyMessageContent = AnyRegularMessageContent | {
 
 export type MessageRelayOptions = {
     messageId?: string
+    /** only send to a specific participant */
+    participant?: string
     additionalAttributes?: { [_: string]: string }
     cachedGroupMetadata?: (jid: string) => Promise<GroupMetadata | undefined>
     //cachedDevices?: (jid: string) => Promise<string[] | undefined>
@@ -136,7 +140,7 @@ export type MessageGenerationOptionsFromContent = MiscMessageGenerationOptions &
 	userJid: string
 }
 
-export type WAMediaUploadFunction = (readStream: ReadStream, opts: { fileEncSha256B64: string, mediaType: MediaType, timeoutMs?: number }) => Promise<{ mediaUrl: string }>
+export type WAMediaUploadFunction = (readStream: Readable, opts: { fileEncSha256B64: string, mediaType: MediaType, timeoutMs?: number }) => Promise<{ mediaUrl: string, directPath: string }>
 
 export type MediaGenerationOptions = {
 	logger?: Logger
@@ -151,7 +155,7 @@ export type MessageContentGenerationOptions = MediaGenerationOptions & {
 }
 export type MessageGenerationOptions = MessageContentGenerationOptions & MessageGenerationOptionsFromContent
 
-export type MessageUpdateType = 'append' | 'notify' | 'prepend'
+export type MessageUpdateType = 'append' | 'notify' | 'prepend' | 'last'
 
 export type MessageInfoEventMap = { [jid: string]: Date }
 export interface MessageInfo {
