@@ -270,7 +270,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
      * type = "preview" for a low res picture
      * type = "image for the high res picture"
      */
-    const profilePictureUrl = async(jid: string, type: 'preview' | 'image' = 'preview') => {
+    const profilePictureUrl = async(jid: string, type: 'preview' | 'image' = 'preview', timeoutMs?: number) => {
         jid = jidNormalizedUser(jid)
         const result = await query({
             tag: 'iq',
@@ -282,7 +282,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
             content: [
                 { tag: 'picture', attrs: { type, query: 'url' } }
             ]
-        })
+        }, timeoutMs)
         const child = getBinaryNodeChild(result, 'picture')
         return child?.attrs?.url
     }
@@ -541,8 +541,8 @@ export const makeChatsSocket = (config: SocketConfig) => {
      * lastMessages must be sorted in reverse chronologically
      * requires the last messages till the last message received; required for archive & unread
     */
-    const chatModify = (mod: ChatModification, jid: string, lastMessages: Pick<proto.IWebMessageInfo, 'key' | 'messageTimestamp'>[]) => {
-        const patch = chatModificationToAppPatch(mod, jid, lastMessages)
+    const chatModify = (mod: ChatModification, jid: string) => {
+        const patch = chatModificationToAppPatch(mod, jid)
         return appPatch(patch)
     }
 

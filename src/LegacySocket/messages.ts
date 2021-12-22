@@ -22,7 +22,7 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 		generateMessageTag,
 		currentEpoch,
 		setQuery,
-		getState
+		state
 	} = sock
 
 	let mediaConn: Promise<MediaConnInfo>
@@ -131,19 +131,7 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 			}
 		}
 
-		const ephemeralProtocolMsg = message.message?.ephemeralMessage?.message?.protocolMessage
-        if (
-            ephemeralProtocolMsg && 
-            ephemeralProtocolMsg.type === proto.ProtocolMessage.ProtocolMessageType.EPHEMERAL_SETTING
-        ) {
-            chatUpdate.ephemeralSettingTimestamp = message.messageTimestamp
-            chatUpdate.ephemeralExpiration = ephemeralProtocolMsg.ephemeralExpiration
-
-			if(isJidGroup(jid)) {
-				emitGroupUpdate({ ephemeralDuration: ephemeralProtocolMsg.ephemeralExpiration || null })
-			}
-        }
-		const protocolMessage = message.message?.protocolMessage
+		const protocolMessage = message.message?.protocolMessage || message.message?.ephemeralMessage?.message?.protocolMessage
         // if it's a message to delete another message
         if (protocolMessage) {
             switch (protocolMessage.type) {
@@ -158,6 +146,14 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 						}
 					])
                     return
+				case proto.ProtocolMessage.ProtocolMessageType.EPHEMERAL_SETTING:
+					chatUpdate.ephemeralSettingTimestamp = message.messageTimestamp
+            		chatUpdate.ephemeralExpiration = protocolMessage.ephemeralExpiration
+
+					if(isJidGroup(jid)) {
+						emitGroupUpdate({ ephemeralDuration: protocolMessage.ephemeralExpiration || null })
+					}
+					break
                 default:
                     break
             }
@@ -165,7 +161,7 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 
 		// check if the message is an action 
 		if (message.messageStubType) {
-			const { user } = getState().legacy!
+			const { user } = state.legacy!
 			//let actor = jidNormalizedUser (message.participant)
 			let participants: string[]
 			const emitParticipantsUpdate = (action: ParticipantAction) => (
@@ -249,7 +245,7 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
     }
 
 	/** Relay (send) a WAMessage; more advanced functionality to send a built WA Message, you may want to stick with sendMessage() */
-    const relayWAMessage = async(message: WAMessage, { waitForAck } = { waitForAck: true }) => {
+    const relayMessage = async(message: WAMessage, { waitForAck } = { waitForAck: true }) => {
 		const json: BinaryNode = {
 			tag: 'action',
 			attrs: { epoch: currentEpoch().toString(), type: 'relay' },
@@ -261,7 +257,7 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 				}
 			]
 		}
-		const isMsgToMe = areJidsSameUser(message.key.remoteJid, getState().legacy.user?.id || '')
+		const isMsgToMe = areJidsSameUser(message.key.remoteJid, state.legacy.user?.id || '')
         const flag = isMsgToMe ? WAFlag.acknowledge : WAFlag.ignore // acknowledge when sending message to oneself
         const mID = message.key.id
 		const finalState = isMsgToMe ? WAMessageStatus.READ : WAMessageStatus.SERVER_ACK
@@ -357,7 +353,7 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 		}
 		const keyPartial = { 
 			remoteJid: jidNormalizedUser(attributes.to),
-			fromMe: areJidsSameUser(attributes.from, getState().legacy?.user?.id || ''),
+			fromMe: areJidsSameUser(attributes.from, state.legacy?.user?.id || ''),
 		}
 		const updates = ids.map<MessageInfoUpdate>(id => ({
 			key: { ...keyPartial, id },
@@ -388,13 +384,18 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 
 	return {
 		...sock,
-		relayWAMessage,
+		relayMessage,
 		generateUrlInfo,
 		messageInfo: async(jid: string, messageID: string) => {
 			const { content }: BinaryNode = await query({
 				json: {
 					tag: 'query',
-					attrs: {type: 'message_info', index: messageID, jid: jid, epoch: currentEpoch().toString()}
+					attrs: {
+						type: 'message_info', 
+						index: messageID, 
+						jid: jid, 
+						epoch: currentEpoch().toString()
+					}
 				}, 
 				binaryTag: [WAMetric.queryRead, WAFlag.ignore], 
 				expect200: true,
@@ -419,7 +420,6 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 			return info
 		},
 		downloadMediaMessage: async(message: WAMessage, type: 'buffer' | 'stream' = 'buffer') => {
-
 			const downloadMediaMessage = async () => {
 				let mContent = extractMessageContent(message.message)
 				if (!mContent) throw new Boom('No message present', { statusCode: 400, data: message })
@@ -486,12 +486,12 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 				messages: getBinaryNodeMessages(node)
 			}
 		},
-		sendWAMessage: async(
+		sendMessage: async(
 			jid: string,
 			content: AnyMessageContent,
 			options: MiscMessageGenerationOptions & { waitForAck?: boolean } = { waitForAck: true }
 		) => {
-			const userJid = getState().legacy.user?.id
+			const userJid = state.legacy.user?.id
 			if(
 				typeof content === 'object' &&
 				'disappearingMessagesInChat' in content &&
@@ -517,16 +517,16 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 					jid,
 					content,
 					{
-						...options,
 						logger,
 						userJid: userJid,
 						getUrlInfo: generateUrlInfo,
 						upload: waUploadToServer,
-						mediaCache: config.mediaCache
+						mediaCache: config.mediaCache,
+						...options,
 					}
 				)
 				
-				await relayWAMessage(msg, { waitForAck: options.waitForAck })
+				await relayMessage(msg, { waitForAck: options.waitForAck })
 				return msg
 			}
 		}

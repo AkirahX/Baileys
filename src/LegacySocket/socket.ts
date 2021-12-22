@@ -62,7 +62,7 @@ export const makeSocket = ({
 	 * Send a message to the WA servers
 	 * @returns the tag attached in the message
 	 * */
-	const sendMessage = async(
+	const sendNode = async(
 		{ json, binaryTag, tag, longTag }: SocketSendMessageOptions
 	) => {
 		tag = tag || generateMessageTag(longTag)
@@ -96,7 +96,7 @@ export const makeSocket = ({
 		return tag
 	}
 	const end = (error: Error | undefined) => {
-        logger.debug({ error }, 'connection closed')
+        logger.info({ error }, 'connection closed')
 
         ws.removeAllListeners('close')
         ws.removeAllListeners('error')
@@ -204,7 +204,7 @@ export const makeSocket = ({
         }
     }
 	/** checks for phone connection */
-    const sendAdminTest = () => sendMessage({ json: ['admin', 'test'] })
+    const sendAdminTest = () => sendNode({ json: ['admin', 'test'] })
     /**
      * Wait for a message with a certain tag to be received
      * @param tag the message tag to await
@@ -213,7 +213,7 @@ export const makeSocket = ({
      */
 	 const waitForMessage = (tag: string, requiresPhoneConnection: boolean, timeoutMs?: number) => {
         if(ws.readyState !== ws.OPEN) {
-            throw new Boom('Connection Closed', { statusCode: DisconnectReason.connectionClosed })
+            throw new Boom('Connection not open', { statusCode: DisconnectReason.connectionClosed })
         }
 
         let cancelToken = () => { }
@@ -228,7 +228,7 @@ export const makeSocket = ({
                         (resolve, reject) => {
                             onRecv = resolve
                             onErr = err => {
-                                reject(err || new Boom('Connection Closed', { statusCode: DisconnectReason.connectionClosed }))
+                                reject(err || new Boom('Intentional Close', { statusCode: DisconnectReason.connectionClosed }))
                             }
                             cancelToken = () => onErr(new Boom('Cancelled', { statusCode: 500 }))
         
@@ -266,7 +266,7 @@ export const makeSocket = ({
 		tag = tag || generateMessageTag(longTag)
         const { promise, cancelToken } = waitForMessage(tag, requiresPhoneConnection, timeoutMs)
         try {
-            await sendMessage({ json, tag, binaryTag })
+            await sendNode({ json, tag, binaryTag })
         } catch(error) {
             cancelToken()
             // swallow error
@@ -311,7 +311,7 @@ export const makeSocket = ({
     const waitForSocketOpen = async() => {
         if(ws.readyState === ws.OPEN) return
         if(ws.readyState === ws.CLOSED || ws.readyState === ws.CLOSING) {
-            throw new Boom('Connection Closed', { statusCode: DisconnectReason.connectionClosed })
+            throw new Boom('Connection Already Closed', { statusCode: DisconnectReason.connectionClosed })
         }
         let onOpen: () => void
         let onClose: (err: Error) => void
@@ -363,11 +363,12 @@ export const makeSocket = ({
     })
 
 	return {
+        type: 'legacy' as 'legacy',
         ws,
+        sendAdminTest,
         updateKeys: (info: { encKey: Buffer, macKey: Buffer }) => authInfo = info,
         waitForSocketOpen,
-		sendRawMessage,
-		sendMessage,
+		sendNode,
 		generateMessageTag,
         waitForMessage,
         query,

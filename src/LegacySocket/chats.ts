@@ -12,14 +12,14 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 		currentEpoch,
 		setQuery,
 		query, 
-		sendMessage,
-		getState
+		sendNode,
+		state
 	} = sock
 
 	const chatsDebounceTimeout = debouncedTimeout(10_000, () => sendChatsQuery(1))
 
 	const sendChatsQuery = (epoch: number) => (
-		sendMessage({
+		sendNode({
 			json: {
 				tag: 'query',
 				attrs: {type: 'chat', epoch: epoch.toString()}
@@ -28,11 +28,12 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 		})
 	)
 
-	const fetchImageUrl = async(jid: string) => {
+	const profilePictureUrl = async(jid: string, timeoutMs?: number) => {
 		const response = await query({ 
 			json: ['query', 'ProfilePicThumb', jid], 
 			expect200: false, 
-			requiresPhoneConnection: false 
+			requiresPhoneConnection: false,
+			timeoutMs
 		})
 		return response.eurl as string | undefined
 	}
@@ -63,7 +64,7 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 				ev.emit('chats.update', [ { id: jid, archive: false } ])
 				break
 			case 'pin':
-				ev.emit('chats.update', [ { id: jid, pin: +attributes.pin } ])
+				ev.emit('chats.update', [ { id: jid, pin: attributes.pin ? +attributes.pin : null } ])
 				break
 			case 'star':
 			case 'unstar':
@@ -104,31 +105,51 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 		return { id, presences: { [participant]: presence } }
 	}
 
+	const chatRead = async(fromMessage: WAMessageKey, count: number) => {
+		await setQuery (
+			[
+				{ 
+					tag: 'read',
+					attrs: { 
+						jid: fromMessage.remoteJid, 
+						count: count.toString(), 
+						index: fromMessage.id, 
+						owner: fromMessage.fromMe ? 'true' : 'false'
+					}
+				}
+			], 
+			[ WAMetric.read, WAFlag.ignore ]
+		)
+		if(config.emitOwnEvents) {
+			ev.emit('chats.update', [{ id: fromMessage.remoteJid, unreadCount: count < 0 ? -1 : 0 }])
+		}	
+	}
+
 	ev.on('connection.update', async({ connection }) => {
 		if(connection !== 'open') return
 		try {
 			await Promise.all([
-				sendMessage({
+				sendNode({
 					json: { tag: 'query', attrs: {type: 'contacts', epoch: '1'} },
 					binaryTag: [ WAMetric.queryContact, WAFlag.ignore ]
 				}),
-				sendMessage({
+				sendNode({
 					json: { tag: 'query', attrs: {type: 'status', epoch: '1'} },
 					binaryTag: [ WAMetric.queryStatus, WAFlag.ignore ]
 				}),
-				sendMessage({
+				sendNode({
 					json: { tag: 'query', attrs: {type: 'quick_reply', epoch: '1'} }, 
 					binaryTag: [ WAMetric.queryQuickReply, WAFlag.ignore ]
 				}),
-				sendMessage({
+				sendNode({
 					json: { tag: 'query', attrs: {type: 'label', epoch: '1'} },
 					binaryTag: [ WAMetric.queryLabel, WAFlag.ignore ]
 				}),
-				sendMessage({
+				sendNode({
 					json: { tag: 'query', attrs: {type: 'emoji', epoch: '1'} },
 					binaryTag: [ WAMetric.queryEmoji, WAFlag.ignore ] 
 				}),
-				sendMessage({
+				sendNode({
 					json: { 
 						tag: 'action', 
 						attrs: { type: 'set', epoch: '1' },
@@ -149,7 +170,12 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 	socketEvents.on('CB:response,type:chat', async ({ content: data }: BinaryNode) => {
 		chatsDebounceTimeout.cancel()
 		if(Array.isArray(data)) {
+			const contacts: Contact[] = []
 			const chats = data.map(({ attrs }): Chat => {
+				const id = jidNormalizedUser(attrs.jid)
+				if(attrs.name) {
+					contacts.push({ id, name: attrs.name })
+				}
 				return {
 					id: jidNormalizedUser(attrs.jid),
 					conversationTimestamp: attrs.t ? +attrs.t : undefined,
@@ -165,8 +191,8 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 				}
 			})
 
-			logger.info(`got ${chats.length} chats`)
-			ev.emit('chats.set', { chats, messages: [] })
+			logger.info(`got ${chats.length} chats, extracted ${contacts.length} contacts with name`)
+			ev.emit('chats.set', { chats, messages: [], contacts })
 		}
 	})
 	// got all contacts from phone
@@ -182,7 +208,7 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 			})
 
 			logger.info(`got ${contacts.length} contacts`)
-			ev.emit('contacts.upsert', contacts)
+			ev.emit('chats.set', { chats: [], messages: [], contacts })
 		}
 	})
 	// status updates
@@ -192,10 +218,10 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 	})
 	// User Profile Name Updates
 	socketEvents.on('CB:Conn,pushname', json => {
-		const { legacy: { user }, connection } = getState()
+		const { legacy: { user }, connection } = state
 		if(connection === 'open' && json[1].pushname !== user.name) {
 			user.name = json[1].pushname
-			ev.emit('connection.update', { legacy: { ...getState().legacy, user } })
+			ev.emit('connection.update', { legacy: { ...state.legacy, user } })
 		}
 	})
 	// read updates
@@ -206,7 +232,7 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 			const update: Partial<Chat> = {
 				id: jidNormalizedUser(attrs.jid)
 			}
-			if (attrs.type === 'false') update.unreadCount = -1
+			if(attrs.type === 'false') update.unreadCount = -1
 			else update.unreadCount = 0
 
 			ev.emit('chats.update', [update])
@@ -216,7 +242,7 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 	socketEvents.on('CB:Cmd,type:picture', async json => {
 		json = json[1]
 		const id = jidNormalizedUser(json.jid)
-		const imgUrl = await fetchImageUrl(id).catch(() => '')
+		const imgUrl = await profilePictureUrl(id).catch(() => '')
 		
 		ev.emit('contacts.update', [ { id, imgUrl } ])
 	})
@@ -232,9 +258,13 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 	socketEvents.on('CB:action,,user', (json: BinaryNode) => {
 		if(Array.isArray(json.content)) {
 			const user = json.content[0].attrs
-			user.id = jidNormalizedUser(user.id)
+			if(user.id) {
+				user.id = jidNormalizedUser(user.id)
 			
-			//ev.emit('contacts.upsert', [user])
+				//ev.emit('contacts.upsert', [user])
+			} else {
+				logger.warn({ json }, 'recv unknown action')
+			}
 		}
 	})
 
@@ -251,56 +281,44 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 		ev.emit('blocklist.set', { blocklist })
 	})
 
+	socketEvents.on('ws-close', () => {
+		chatsDebounceTimeout.cancel()
+	})
+
 	return {
 		...sock,
 		sendChatsQuery,
-		fetchImageUrl,
-		chatRead: async(fromMessage: WAMessageKey, count: number) => {
-			await setQuery (
-				[
-					{ tag: 'read',
-						attrs: { 
-							jid: fromMessage.remoteJid, 
-							count: count.toString(), 
-							index: fromMessage.id, 
-							owner: fromMessage.fromMe ? 'true' : 'false'
-						}
-					}
-				], 
-				[ WAMetric.read, WAFlag.ignore ]
-			)
-			if(config.emitOwnEvents) {
-				ev.emit ('chats.update', [{ id: fromMessage.remoteJid, unreadCount: count < 0 ? -1 : 0 }])
-			}	
-		},
+		profilePictureUrl,
+		chatRead,
 		/**
 		 * Modify a given chat (archive, pin etc.)
 		 * @param jid the ID of the person/group you are modifiying
 		 */
-		modifyChat: async(jid: string, modification: ChatModification, chatInfo: Pick<Chat, 'mute' | 'pin'>, index?: WAMessageKey) => {	 
+		chatModify: async(modification: ChatModification, jid: string, chatInfo: Pick<Chat, 'mute' | 'pin'>, timestampNow?: number) => {	 
 			let chatAttrs: BinaryNode['attrs'] = { jid: jid }
 			let data: BinaryNode[] | undefined = undefined
-			const stamp = unixTimestampSeconds()
+
+			timestampNow = timestampNow || unixTimestampSeconds()
 
 			if('archive' in modification) {
 				chatAttrs.type = modification.archive ? 'archive' : 'unarchive'
 			} else if('pin' in modification) {
 				chatAttrs.type = 'pin'
 				if(modification.pin) {
-					chatAttrs.pin = stamp.toString()
+					chatAttrs.pin = timestampNow.toString()
 				} else {
 					chatAttrs.previous = chatInfo.pin!.toString()
 				}
 			} else if('mute' in modification) {
 				chatAttrs.type = 'mute'
 				if(modification.mute) {
-					chatAttrs.mute = (stamp + modification.mute).toString()
+					chatAttrs.mute = (timestampNow + modification.mute).toString()
 				} else {
 					chatAttrs.previous = chatInfo.mute!.toString()
 				}
 			} else if('clear' in modification) {
 				chatAttrs.type = 'clear'
-				chatAttrs.modify_tag = Math.round(Math.random ()*1000000).toString()
+				chatAttrs.modify_tag = Math.round(Math.random()*1000000).toString()
 				if(modification.clear !== 'all') {
 					data = modification.clear.messages.map(({ id, fromMe }) => (
 						{ 
@@ -317,17 +335,27 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 						attrs: { owner: (!!fromMe).toString(), index: id }
 					}
 				))
+			} else if('markRead' in modification) {
+				const indexKey = modification.lastMessages[modification.lastMessages.length-1].key
+				return chatRead(indexKey, modification.markRead ? 0 : -1)
+			} else if('delete' in modification) {
+				chatAttrs.type = 'delete'
 			}
 
-			if(index) {
-				chatAttrs.index = index.id
-				chatAttrs.owner = index.fromMe ? 'true' : 'false'
+			if('lastMessages' in modification) {
+				const indexKey = modification.lastMessages[modification.lastMessages.length-1].key
+				if(indexKey) {
+					chatAttrs.index = indexKey.id
+					chatAttrs.owner = indexKey.fromMe ? 'true' : 'false'
+				}
 			}
 
 			const node = { tag: 'chat', attrs: chatAttrs, content: data }
 			const response = await setQuery([node], [ WAMetric.chat, WAFlag.ignore ])
-			// apply it and emit events
-			executeChatModification(node)
+			if(config.emitOwnEvents) {
+				// apply it and emit events
+				executeChatModification(node)
+			}
 			return response
 		},
 		/** 
@@ -335,12 +363,12 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 		 * @param str phone number/jid you want to check for
 		 * @returns undefined if the number doesn't exists, otherwise the correctly formatted jid
 		 */
-		isOnWhatsApp: async (str: string) => {
+		onWhatsApp: async(str: string) => {
 			const { status, jid, biz } = await query({
 				json: ['query', 'exist', str], 
 				requiresPhoneConnection: false
 			})
-			if (status === 200) {
+			if(status === 200) {
 				return { 
 					exists: true, 
 					jid: jidNormalizedUser(jid), 
@@ -354,7 +382,7 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 		 * @param type your presence
 		 */
 		sendPresenceUpdate: ( type: WAPresence, jid: string | undefined) => (
-			sendMessage({
+			sendNode({
 				binaryTag: [WAMetric.presence, WAFlag[type]], // weird stuff WA does
 				json: { 
 					tag: 'action',
@@ -373,7 +401,7 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 		 * this returns nothing, you'll receive updates in chats.update event
 		 * */
 		presenceSubscribe: async (jid: string) => (
-			sendMessage({ json: ['action', 'presence', 'subscribe', jid] })
+			sendNode({ json: ['action', 'presence', 'subscribe', jid] })
 		),
 		/** Query the status of the person (see groupMetadata() for groups) */
 		getStatus: async(jid: string) => {
@@ -390,7 +418,7 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 					}
 				]
 			)
-			ev.emit('contacts.update', [{ id: getState().legacy!.user!.id, status }])
+			ev.emit('contacts.update', [{ id: state.legacy!.user!.id, status }])
 			return response
 		},
 		/** Updates business profile. */
@@ -413,9 +441,9 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 			)) as any as {status: number, pushname: string}
 
 			if(config.emitOwnEvents) {
-				const user = { ...getState().legacy!.user!, name }
+				const user = { ...state.legacy!.user!, name }
 				ev.emit('connection.update', { legacy: {
-					...getState().legacy, user
+					...state.legacy, user
 				} })
 				ev.emit('contacts.update', [{ id: user.id, name }])
 			}
@@ -439,7 +467,7 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 				]
 			}
 
-			const user = getState().legacy?.user
+			const user = state.legacy?.user
 			const { eurl } = await this.setQuery ([query], [WAMetric.picture, 136], tag) as { eurl: string, status: number }
 			
 			if(config.emitOwnEvents) {
@@ -447,7 +475,7 @@ const makeChatsSocket = (config: LegacySocketConfig) => {
 					user.imgUrl = eurl
 					ev.emit('connection.update', {
 						legacy: {
-							...getState().legacy,
+							...state.legacy,
 							user
 						}
 					})
