@@ -32,7 +32,8 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 			mediaConn = (async() => {
 				const {media_conn} = await query({
 					json: ['query', 'mediaConn'], 
-					requiresPhoneConnection: false
+					requiresPhoneConnection: false,
+					expect200: true
 				})
 				media_conn.fetchDate = new Date()
 				return media_conn as MediaConnInfo
@@ -98,12 +99,12 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 		const attrs = response.attrs
 		Object.assign(content, attrs) // update message
 
-		ev.emit('messages.update', [{ key: message.key, update: { message: message.message } }])
+		ev.emit('messages.upsert', { messages: [message], type: 'replace' })
 
 		return response
 	}
 
-	const onMessage = (message: WAMessage, type: MessageUpdateType | 'update') => {
+	const onMessage = (message: WAMessage, type: MessageUpdateType) => {
 		const jid = message.key.remoteJid!
 		// store chat updates in this
 		const chatUpdate: Partial<Chat> = { 
@@ -213,11 +214,8 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 		if(Object.keys(chatUpdate).length > 1) {
 			ev.emit('chats.update', [chatUpdate])
 		}
-		if(type === 'update') {
-			ev.emit('messages.update', [ { update: message, key: message.key } ])
-		} else {
-			ev.emit('messages.upsert', { messages: [message], type })
-		} 
+
+		ev.emit('messages.upsert', { messages: [message], type })
 	}
 
 	const waUploadToServer = getWAUploadToServer(config, refreshMediaConn)
@@ -306,11 +304,12 @@ const makeMessagesSocket = (config: LegacySocketConfig) => {
 			onMessage(msg, 'notify')
 		}
 	})
-	// If a message has been updated (usually called when a video message gets its upload url, or live locations)
+	// If a message has been updated 
+	// usually called when a video message gets its upload url, or live locations or ciphertext message gets fixed
 	socketEvents.on ('CB:action,add:update,message', (node: BinaryNode) => {
 		const msgs = getBinaryNodeMessages(node)
 		for(const msg of msgs) {
-			onMessage(msg, 'update')
+			onMessage(msg, 'replace')
 		}
 	})
 	// message status updates

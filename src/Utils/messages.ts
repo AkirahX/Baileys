@@ -66,9 +66,9 @@ export const prepareWAMessageMedia = async(
 	}
 	const uploadData: MediaUploadData = { 
 		...message,
-		[mediaType]: undefined,
 		media: message[mediaType]
 	}
+	delete uploadData[mediaType]
 	// check if cacheable + generate cache key
 	const cacheableKey = typeof uploadData.media === 'object' && 
 			('url' in uploadData.media) && 
@@ -77,14 +77,6 @@ export const prepareWAMessageMedia = async(
 				// generate the key
 				mediaType + ':' + uploadData.media.url!.toString()
 			)
-	// check for cache hit
-	if(cacheableKey) {
-		const mediaBuff: Buffer = options.mediaCache!.get(cacheableKey)
-		if(mediaBuff) {
-			logger?.debug({ cacheableKey }, `got media cache hit`)
-			return WAProto.Message.decode(mediaBuff)
-		}
-	}
 
 	if(mediaType === 'document' && !uploadData.fileName) {
 		uploadData.fileName = 'file'
@@ -92,6 +84,23 @@ export const prepareWAMessageMedia = async(
 	if(!uploadData.mimetype) {
 		uploadData.mimetype = MIMETYPE_MAP[mediaType]
 	}
+
+	// check for cache hit
+	if(cacheableKey) {
+		const mediaBuff: Buffer = options.mediaCache!.get(cacheableKey)
+		if(mediaBuff) {
+			logger?.debug({ cacheableKey }, `got media cache hit`)
+			
+			const obj = WAProto.Message.decode(mediaBuff)
+			const key = `${mediaType}Message`
+
+			delete uploadData.media
+			Object.assign(obj[key], { ...uploadData })
+
+			return obj
+		}
+	}
+
 	const requiresDurationComputation = mediaType === 'audio' && typeof uploadData.seconds === 'undefined'
 	const requiresThumbnailComputation = (mediaType === 'image' || mediaType === 'video') && 
 										(typeof uploadData['jpegThumbnail'] === 'undefined')
@@ -322,7 +331,8 @@ export const generateWAMessageContent = async(
 			buttonText: message.buttonText,
 			title: message.title,
 			footerText: message.footer,
-			description: message.text
+			description: message.text,
+			listType: proto.ListMessage.ListMessageListType['SINGLE_SELECT']
 		}
 
 		m = { listMessage }
